@@ -39,6 +39,39 @@ async function stopExtraction() {
     }
 }
 
+function copyLogs() {
+    const logsContainer = document.getElementById('logs');
+    const btn = document.getElementById('copyLogsBtn');
+    const label = document.getElementById('copyLogsLabel');
+    if (!logsContainer) return;
+
+    const lines = Array.from(logsContainer.querySelectorAll('.log-entry'))
+        .map(el => el.textContent.trim())
+        .join('\n');
+
+    navigator.clipboard.writeText(lines).then(() => {
+        btn.classList.add('copied');
+        label.textContent = '✓ Copied';
+        setTimeout(() => {
+            btn.classList.remove('copied');
+            label.textContent = 'Copy';
+        }, 2000);
+    }).catch(() => {
+        // Fallback for older browsers
+        const ta = document.createElement('textarea');
+        ta.value = lines;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        label.textContent = '✓ Copied';
+        setTimeout(() => { label.textContent = 'Copy'; }, 2000);
+    });
+}
+
+
 function renderResults(documents) {
     const resultsContainer = document.getElementById('results');
     if (!resultsContainer) return;
