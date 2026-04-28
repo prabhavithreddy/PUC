@@ -61,10 +61,19 @@ class PlaywrightExtractor(BaseExtractor):
                         break
 
                     await manager.send_log(job_id, f"--- Step {step+1}/{max_steps} ---")
-                    await page.wait_for_timeout(2000)
+                    await page.wait_for_timeout(1000)  # reduced from 2000ms
 
-                    page_text = await self._get_page_content(page)
-                    elements = await get_interactive_elements(page)
+                    try:
+                        page_text = await self._get_page_content(page)
+                    except Exception as pe:
+                        await manager.send_log(job_id, f"Page read warning: {pe}. Retrying...")
+                        await page.wait_for_timeout(1500)
+                        try:
+                            page_text = await self._get_page_content(page)
+                        except:
+                            page_text = "(page unreadable)"
+
+                    elements = await get_interactive_elements(page)  # already has timeout+fallback
                     filtered_elements = [el for el in elements if el.get('selector') not in acted_selectors]
 
                     prompt = self._get_agent_prompt(page_text, filtered_elements, action_history, start_date, end_date)
@@ -79,32 +88,16 @@ class PlaywrightExtractor(BaseExtractor):
                     await manager.send_log(job_id, f"Agent decided to: {action}")
 
                     if action in ("extract_table", "extract"):
-                        if action == "extract_table":
-                            # --- Deterministic JS table extraction (no LLM limits) ---
-                            await manager.send_log(job_id, "Running deterministic table extraction...")
-                            scraped = await self._extract_table_from_page(page)
-                            if not scraped and not all_collected_docs and not agent_downloads:
-                                await manager.send_log(job_id, "No table data found yet. Waiting...")
-                                await page.wait_for_timeout(2000)
-                                continue
-                            if scraped:
-                                all_collected_docs.extend(scraped)
-                                await manager.send_log(job_id, f"Table scraper captured {len(scraped)} rows. Total: {len(all_collected_docs)}")
-                        else:
-                            # Fallback: use LLM-provided documents (filter placeholders)
-                            docs = action_plan.get("documents", [])
-                            real_docs = [
-                                d for d in docs
-                                if d.get("title") and d.get("title") not in ("Document", "", None)
-                                and d.get("date") and d.get("date") not in ("-", "", None)
-                            ]
-                            if not real_docs and not all_collected_docs and not agent_downloads:
-                                await manager.send_log(job_id, f"Agent extracted {len(docs)} placeholder doc(s). Waiting...")
-                                await page.wait_for_timeout(2000)
-                                continue
-                            if real_docs:
-                                all_collected_docs.extend(real_docs)
-                                await manager.send_log(job_id, f"Collected {len(real_docs)} docs. Total: {len(all_collected_docs)}")
+                        # Always deterministic JS extraction — no LLM data capture
+                        await manager.send_log(job_id, "Running deterministic table extraction...")
+                        scraped = await self._extract_table_from_page(page)
+                        if not scraped and not all_collected_docs and not agent_downloads:
+                            await manager.send_log(job_id, "No table data found yet. Waiting...")
+                            await page.wait_for_timeout(2000)
+                            continue
+                        if scraped:
+                            all_collected_docs.extend(scraped)
+                            await manager.send_log(job_id, f"Table scraper captured {len(scraped)} rows. Total: {len(all_collected_docs)}")
 
                         # --- Pagination: look for a visible next-page control ---
                         next_selectors = [
@@ -250,7 +243,7 @@ class PlaywrightExtractor(BaseExtractor):
             }).join('\\n\\n');
 
             return "--- PAGE TEXT ---\\n" + text.substring(0, 2000) + "\\n\\n--- FULL RESULTS TABLE (extract ALL rows, do not truncate) ---\\n" + tableText;
-        }''')
+        }''', timeout=10000)
 
     def _get_agent_prompt(self, page_text, elements, history, start, end):
         history_str = json.dumps(history[-5:], indent=2)
