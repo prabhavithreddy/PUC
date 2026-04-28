@@ -127,7 +127,9 @@ class PlaywrightExtractor(BaseExtractor):
                             continue
 
                         # No more pages — enrich with click-based URLs then return
-                        await self._enrich_with_click_urls(page, all_collected_docs, job_id, manager)
+                        await self._enrich_with_click_urls(
+                            page, all_collected_docs, job_id, manager, model
+                        )
                         final_docs = [
                             {**d, "title": f"{i+1}. {d.get('title', 'Document')}"}
                             for i, d in enumerate(all_collected_docs)
@@ -165,10 +167,82 @@ class PlaywrightExtractor(BaseExtractor):
             await manager.send_result(job_id, [])
 
     # ---------------------------------------------------------------------------
+    # Screenshot-based selector discovery (vision LLM)
+    # ---------------------------------------------------------------------------
+
+    async def _discover_selectors_from_screenshot(self, page, job_id, manager):
+        """Take a screenshot of the current overlay and ask a vision LLM to identify
+        the exact CSS selectors for the download button and close button."""
+        import base64, re, json as _json, os
+        os.makedirs("screenshots", exist_ok=True)
+
+        try:
+            # Save screenshot to disk for debugging
+            shot_path = f"screenshots/{job_id}_overlay.jpg"
+            screenshot = await page.screenshot(type="jpeg", quality=80, full_page=False)
+            with open(shot_path, "wb") as f:
+                f.write(screenshot)
+            b64 = base64.b64encode(screenshot).decode()
+            await manager.send_log(job_id, f"  Screenshot saved: {shot_path}")
+
+            # Get a DOM snippet around visible dialogs/overlays
+            dom_snippet = await page.evaluate('''() => {
+                const candidates = [
+                    document.querySelector("[role=\'dialog\']"),
+                    document.querySelector(".modal"),
+                    document.querySelector(".overlay"),
+                    document.querySelector("iframe"),
+                ];
+                const el = candidates.find(e => e !== null);
+                return el ? el.outerHTML.substring(0, 3000) : document.body.innerHTML.substring(0, 2000);
+            }''')
+
+            from litellm import completion
+            # Always use a vision-capable model for this step
+            vision_model = "openrouter/anthropic/claude-3-5-sonnet-20240620"
+            response = completion(
+                model=vision_model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                        },
+                        {
+                            "type": "text",
+                            "text": (
+                                "This is a government document management system overlay/viewer.\n"
+                                "DOM snippet:\n" + dom_snippet[:2000] + "\n\n"
+                                "Looking at the screenshot AND the DOM, identify:\n"
+                                "1. The CSS selector for the DOWNLOAD button/link\n"
+                                "2. The CSS selector for the CLOSE/dismiss button\n"
+                                "Return ONLY a JSON object, no explanation:\n"
+                                '{"download_selector": "...", "close_selector": "..."}'
+                            )
+                        }
+                    ]
+                }],
+                max_tokens=300,
+            )
+            raw = response.choices[0].message.content.strip()
+            await manager.send_log(job_id, f"  Vision selector response: {raw[:200]}")
+
+            decoder = _json.JSONDecoder()
+            match = re.search(r'[\[{]', raw)
+            if match:
+                parsed, _ = decoder.raw_decode(raw, match.start())
+                return parsed
+        except Exception as e:
+            await manager.send_log(job_id, f"  Vision discovery failed ({type(e).__name__}): {e}")
+
+        return {}  # Fall back to hardcoded selectors
+
+    # ---------------------------------------------------------------------------
     # Click-based URL capture (for JS-gated document links like OnBase)
     # ---------------------------------------------------------------------------
 
-    async def _enrich_with_click_urls(self, page, docs, job_id, manager):
+    async def _enrich_with_click_urls(self, page, docs, job_id, manager, model=""):
         """Click each table row, handle the OnBase PDF overlay:
         capture the PDF URL, click Download, save the file, close overlay."""
         import os
@@ -204,6 +278,8 @@ class PlaywrightExtractor(BaseExtractor):
 
         row_handles = await page.query_selector_all("table tbody tr")
         doc_idx = 0
+        discovered_download_sel = None  # populated from screenshot on first overlay
+        discovered_close_sel = None
 
         for row_el in row_handles:
             while doc_idx < len(docs) and docs[doc_idx].get("url"):
@@ -238,8 +314,27 @@ class PlaywrightExtractor(BaseExtractor):
 
                 await human_delay(500, 1000)  # Let viewer fully render
 
-                # --- 3. Capture the document URL from the overlay ---
-                # Check iframes for src URL (often the actual PDF link)
+                # --- 3. Screenshot → vision LLM discovers exact selectors (first row only) ---
+                if discovered_download_sel is None:
+                    await manager.send_log(job_id, "  Taking screenshot for vision-based selector discovery...")
+                    vision_result = await self._discover_selectors_from_screenshot(page, job_id, manager)
+                    discovered_download_sel = vision_result.get("download_selector") or ""
+                    discovered_close_sel    = vision_result.get("close_selector") or ""
+                    await manager.send_log(
+                        job_id,
+                        f"  Discovered → download: '{discovered_download_sel}' "
+                        f"close: '{discovered_close_sel}'"
+                    )
+
+                # Build effective selector lists: vision-discovered first, then fallbacks
+                effective_download = (
+                    ([discovered_download_sel] if discovered_download_sel else []) + DOWNLOAD_SELECTORS
+                )
+                effective_close = (
+                    ([discovered_close_sel] if discovered_close_sel else []) + CLOSE_SELECTORS
+                )
+
+                # --- 4. Capture the document URL from the overlay ---
                 iframe_url = await page.evaluate('''() => {
                     const iframes = document.querySelectorAll("iframe");
                     for (const f of iframes) {
@@ -251,9 +346,9 @@ class PlaywrightExtractor(BaseExtractor):
                     doc["url"] = iframe_url
                     await manager.send_log(job_id, f"  Viewer iframe URL: {iframe_url[:80]}")
 
-                # --- 4. Find and click the Download button ---
+                # --- 5. Find and click the Download button ---
                 download_el = None
-                for sel in DOWNLOAD_SELECTORS:
+                for sel in effective_download:
                     try:
                         el = page.locator(sel).first
                         if await el.is_visible(timeout=1500):
@@ -261,6 +356,7 @@ class PlaywrightExtractor(BaseExtractor):
                             break
                     except Exception:
                         pass
+
 
                 if download_el:
                     try:
@@ -280,9 +376,9 @@ class PlaywrightExtractor(BaseExtractor):
                 else:
                     await manager.send_log(job_id, f"  No download button found in viewer for row {doc_idx+1}")
 
-                # --- 5. Close the overlay ---
+                # --- 6. Close the overlay ---
                 closed = False
-                for sel in CLOSE_SELECTORS:
+                for sel in effective_close:
                     try:
                         el = page.locator(sel).first
                         if await el.is_visible(timeout=800):
