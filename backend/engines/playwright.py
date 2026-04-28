@@ -126,7 +126,8 @@ class PlaywrightExtractor(BaseExtractor):
                             acted_selectors = set()
                             continue
 
-                        # No more pages — number and return results
+                        # No more pages — enrich with click-based URLs then return
+                        await self._enrich_with_click_urls(page, all_collected_docs, job_id, manager)
                         final_docs = [
                             {**d, "title": f"{i+1}. {d.get('title', 'Document')}"}
                             for i, d in enumerate(all_collected_docs)
@@ -162,6 +163,67 @@ class PlaywrightExtractor(BaseExtractor):
         except Exception as e:
             await manager.send_log(job_id, f"ERROR in Playwright: {e}")
             await manager.send_result(job_id, [])
+
+    # ---------------------------------------------------------------------------
+    # Click-based URL capture (for JS-gated document links like OnBase)
+    # ---------------------------------------------------------------------------
+
+    async def _enrich_with_click_urls(self, page, docs, job_id, manager):
+        """Click each table row that has no URL and capture the popup/navigation URL.
+        OnBase opens documents in a new browser window on row click."""
+        missing = [d for d in docs if not d.get("url")]
+        if not missing:
+            return
+
+        await manager.send_log(job_id, f"Capturing click-based URLs for {len(missing)} rows...")
+
+        # Get all body rows from the first table on the page
+        row_handles = await page.query_selector_all("table tbody tr")
+        doc_idx = 0  # index into `docs` (skip docs that already have a URL)
+
+        for row_el in row_handles:
+            # Find the next doc that still needs a URL
+            while doc_idx < len(docs) and docs[doc_idx].get("url"):
+                doc_idx += 1
+            if doc_idx >= len(docs):
+                break
+
+            doc = docs[doc_idx]
+            captured = False
+
+            # --- Strategy 1: popup window (most common for OnBase) ---
+            try:
+                async with page.expect_popup(timeout=4000) as popup_info:
+                    await row_el.scroll_into_view_if_needed()
+                    await row_el.click()
+                popup = await popup_info.value
+                await popup.wait_for_load_state("domcontentloaded", timeout=8000)
+                doc["url"] = popup.url
+                await popup.close()
+                await manager.send_log(job_id, f"  Got popup URL for row {doc_idx+1}: {doc['url'][:80]}")
+                captured = True
+            except Exception:
+                pass
+
+            # --- Strategy 2: same-tab navigation ---
+            if not captured:
+                try:
+                    origin = page.url
+                    await row_el.scroll_into_view_if_needed()
+                    await row_el.click()
+                    await page.wait_for_url(lambda u: u != origin, timeout=3000)
+                    doc["url"] = page.url
+                    await page.go_back(wait_until="networkidle", timeout=10000)
+                    await manager.send_log(job_id, f"  Got nav URL for row {doc_idx+1}: {doc['url'][:80]}")
+                    captured = True
+                except Exception:
+                    pass
+
+            if not captured:
+                await manager.send_log(job_id, f"  No URL captured for row {doc_idx+1} — link may require auth")
+
+            doc_idx += 1
+            await human_delay(300, 700)  # Polite pause between clicks
 
     # ---------------------------------------------------------------------------
     # Deterministic JS table scraper
