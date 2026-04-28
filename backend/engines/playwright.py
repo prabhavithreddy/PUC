@@ -169,61 +169,145 @@ class PlaywrightExtractor(BaseExtractor):
     # ---------------------------------------------------------------------------
 
     async def _enrich_with_click_urls(self, page, docs, job_id, manager):
-        """Click each table row that has no URL and capture the popup/navigation URL.
-        OnBase opens documents in a new browser window on row click."""
-        missing = [d for d in docs if not d.get("url")]
-        if not missing:
-            return
+        """Click each table row, handle the OnBase PDF overlay:
+        capture the PDF URL, click Download, save the file, close overlay."""
+        import os
+        os.makedirs("downloads", exist_ok=True)
 
-        await manager.send_log(job_id, f"Capturing click-based URLs for {len(missing)} rows...")
+        # Selectors to detect that an overlay/viewer has appeared
+        OVERLAY_SELECTORS = [
+            ".modal", ".overlay", ".viewer", ".lightbox",
+            "[role='dialog']", "[role='document']",
+            "iframe[src*='pdf']", "iframe[src*='view']", "iframe[src*='doc']",
+            "#viewer", "#document-viewer", ".document-viewer",
+            ".obpa-document-viewer", ".pdf-viewer",
+        ]
 
-        # Get all body rows from the first table on the page
+        # Selectors for the Download button inside the viewer
+        DOWNLOAD_SELECTORS = [
+            "a[download]",
+            "button[title*='Download' i]", "a[title*='Download' i]",
+            "[aria-label*='Download' i]",
+            "#download", ".download", ".downloadButton",
+            ".toolbarButton.download",          # PDF.js
+            "button:text('Download')", "a:text('Download')",
+            "[class*='download' i]",
+        ]
+
+        # Selectors to close the overlay
+        CLOSE_SELECTORS = [
+            "button[aria-label*='Close' i]", "button[title*='Close' i]",
+            ".close", ".modal-close", "[class*='close' i]",
+            "button:text('Close')", "button:text('×')", "button:text('✕')",
+            "#closeBtn", ".closeButton",
+        ]
+
         row_handles = await page.query_selector_all("table tbody tr")
-        doc_idx = 0  # index into `docs` (skip docs that already have a URL)
+        doc_idx = 0
 
         for row_el in row_handles:
-            # Find the next doc that still needs a URL
             while doc_idx < len(docs) and docs[doc_idx].get("url"):
                 doc_idx += 1
             if doc_idx >= len(docs):
                 break
 
             doc = docs[doc_idx]
-            captured = False
+            await manager.send_log(job_id, f"  Opening row {doc_idx+1}: {doc.get('title','')[:50]}...")
 
-            # --- Strategy 1: popup window (most common for OnBase) ---
             try:
-                async with page.expect_popup(timeout=4000) as popup_info:
-                    await row_el.scroll_into_view_if_needed()
-                    await row_el.click()
-                popup = await popup_info.value
-                await popup.wait_for_load_state("domcontentloaded", timeout=8000)
-                doc["url"] = popup.url
-                await popup.close()
-                await manager.send_log(job_id, f"  Got popup URL for row {doc_idx+1}: {doc['url'][:80]}")
-                captured = True
-            except Exception:
-                pass
+                # --- 1. Click the row ---
+                await row_el.scroll_into_view_if_needed()
+                await human_delay(200, 400)
+                await row_el.click()
 
-            # --- Strategy 2: same-tab navigation ---
-            if not captured:
+                # --- 2. Wait for overlay to appear ---
+                overlay_el = None
+                for sel in OVERLAY_SELECTORS:
+                    try:
+                        el = page.locator(sel).first
+                        await el.wait_for(state="visible", timeout=5000)
+                        overlay_el = el
+                        break
+                    except Exception:
+                        pass
+
+                if overlay_el is None:
+                    await manager.send_log(job_id, f"  No overlay detected for row {doc_idx+1}")
+                    doc_idx += 1
+                    continue
+
+                await human_delay(500, 1000)  # Let viewer fully render
+
+                # --- 3. Capture the document URL from the overlay ---
+                # Check iframes for src URL (often the actual PDF link)
+                iframe_url = await page.evaluate('''() => {
+                    const iframes = document.querySelectorAll("iframe");
+                    for (const f of iframes) {
+                        if (f.src && f.src !== "" && !f.src.startsWith("about:")) return f.src;
+                    }
+                    return "";
+                }''')
+                if iframe_url:
+                    doc["url"] = iframe_url
+                    await manager.send_log(job_id, f"  Viewer iframe URL: {iframe_url[:80]}")
+
+                # --- 4. Find and click the Download button ---
+                download_el = None
+                for sel in DOWNLOAD_SELECTORS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=1500):
+                            download_el = el
+                            break
+                    except Exception:
+                        pass
+
+                if download_el:
+                    try:
+                        async with page.expect_download(timeout=15000) as dl_info:
+                            await human_click(page, download_el)
+                        download = await dl_info.value
+                        fname = download.suggested_filename or f"doc_{doc_idx+1}"
+                        suffix = os.path.splitext(fname)[1] or ".pdf"
+                        filepath = f"downloads/{job_id}_doc_{doc_idx+1}{suffix}"
+                        await download.save_as(filepath)
+                        doc["local_url"] = f"/{filepath}"
+                        if not doc.get("url"):
+                            doc["url"] = filepath
+                        await manager.send_log(job_id, f"  Downloaded: {fname}")
+                    except Exception as dl_err:
+                        await manager.send_log(job_id, f"  Download click failed: {type(dl_err).__name__}")
+                else:
+                    await manager.send_log(job_id, f"  No download button found in viewer for row {doc_idx+1}")
+
+                # --- 5. Close the overlay ---
+                closed = False
+                for sel in CLOSE_SELECTORS:
+                    try:
+                        el = page.locator(sel).first
+                        if await el.is_visible(timeout=800):
+                            await el.click()
+                            closed = True
+                            break
+                    except Exception:
+                        pass
+
+                if not closed:
+                    await page.keyboard.press("Escape")  # Fallback: Escape key
+
+                await human_delay(400, 800)  # Let overlay fully dismiss
+
+            except Exception as e:
+                await manager.send_log(job_id, f"  Row {doc_idx+1} error: {type(e).__name__}: {e}")
+                # Try Escape to recover from any stuck overlay
                 try:
-                    origin = page.url
-                    await row_el.scroll_into_view_if_needed()
-                    await row_el.click()
-                    await page.wait_for_url(lambda u: u != origin, timeout=3000)
-                    doc["url"] = page.url
-                    await page.go_back(wait_until="networkidle", timeout=10000)
-                    await manager.send_log(job_id, f"  Got nav URL for row {doc_idx+1}: {doc['url'][:80]}")
-                    captured = True
+                    await page.keyboard.press("Escape")
+                    await human_delay(300, 500)
                 except Exception:
                     pass
 
-            if not captured:
-                await manager.send_log(job_id, f"  No URL captured for row {doc_idx+1} — link may require auth")
-
             doc_idx += 1
-            await human_delay(300, 700)  # Polite pause between clicks
+            await human_delay(300, 600)
 
     # ---------------------------------------------------------------------------
     # Deterministic JS table scraper
