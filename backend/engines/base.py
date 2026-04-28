@@ -7,26 +7,26 @@ from litellm import completion, completion_cost
 # --- Common Utilities ---
 
 async def get_interactive_elements(page):
-    return await page.evaluate('''() => {
-        const elements = Array.from(document.querySelectorAll('input, button, select, a'));
-        return elements.map(el => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width === 0 || rect.height === 0) return null;
-            
-            const obj = {
-                tag: el.tagName,
-                selector: el.id ? `#${el.id}` : (el.tagName.toLowerCase() + (el.className ? `.${el.className.split(' ').join('.')}` : ''))
-            };
-            
-            if (el.innerText || el.value || el.placeholder) obj.text = (el.innerText || el.value || el.placeholder).trim().substring(0, 100);
-            if (el.placeholder) obj.placeholder = el.placeholder;
-            if (el.type) obj.type = el.type;
-            if (el.name) obj.name = el.name;
-            if (el.href) obj.href = el.href;
-            
-            return obj;
-        }).filter(e => e !== null);
-    }''')
+    try:
+        return await page.evaluate('''() => {
+            const elements = Array.from(document.querySelectorAll('input, button, select, a'));
+            return elements.map(el => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 || rect.height === 0) return null;
+                const obj = {
+                    tag: el.tagName,
+                    selector: el.id ? `#${el.id}` : (el.tagName.toLowerCase() + (el.className ? `.${el.className.split(' ').join('.')}` : ''))
+                };
+                if (el.innerText || el.value || el.placeholder) obj.text = (el.innerText || el.value || el.placeholder).trim().substring(0, 100);
+                if (el.placeholder) obj.placeholder = el.placeholder;
+                if (el.type) obj.type = el.type;
+                if (el.name) obj.name = el.name;
+                if (el.href) obj.href = el.href;
+                return obj;
+            }).filter(e => e !== null);
+        }''')
+    except Exception:
+        return []  # Return empty list if page evaluate times out
 
 async def call_llm(model: str, prompt: str, manager, job_id, total_cost):
     await manager.send_log(job_id, f"Consulting LLM ({model})...")
