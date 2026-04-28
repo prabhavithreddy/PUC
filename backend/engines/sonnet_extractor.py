@@ -315,12 +315,14 @@ class SonnetExtractor(BaseExtractor):
         job_id: str,
         manager,
     ):
-        # Guard: Anthropic path needs the API key
+        # Guard: bare claude-* strings use the Anthropic SDK and need ANTHROPIC_API_KEY.
+        # openrouter/anthropic/claude-* models go through LiteLLM → OPENROUTER_API_KEY only.
         if _is_claude(model) and not os.environ.get("ANTHROPIC_API_KEY", ""):
             await manager.send_log(
                 job_id,
                 "ERROR: ANTHROPIC_API_KEY is not set. "
-                "Add it to run.sh or pick a non-Claude model."
+                "Either set it, or pick a Claude model via OpenRouter "
+                "(e.g. openrouter/anthropic/claude-sonnet-4-5) which only needs OPENROUTER_API_KEY."
             )
             await manager.send_result(job_id, [])
             return

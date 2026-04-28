@@ -62,13 +62,23 @@
                         <div class="input-group">
                             <label for="model">LLM Model</label>
                             <select id="model">
-                                <option value="openrouter/meta-llama/llama-3.3-70b-instruct" selected>Llama 3.3 70B Instruct (Fast)</option>
-                                <option value="openrouter/google/gemini-2.5-flash-preview:thinking">Gemini 2.5 Flash (Thinking)</option>
-                                <option value="openrouter/google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
-                                <option value="openrouter/anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
-                                <option value="openrouter/qwen/qwen3-32b">Qwen 3 32B</option>
-                                <option value="openrouter/meta-llama/llama-3.1-8b-instruct">Llama 3.1 8B (Lightweight)</option>
-                                <option value="openrouter/deepseek/deepseek-r1">DeepSeek R1 (Reasoning)</option>
+                                <optgroup label="🟣 Claude via OpenRouter (no Anthropic key needed)">
+                                    <option value="openrouter/anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                                    <option value="openrouter/anthropic/claude-3-5-sonnet-20240620">Claude 3.5 Sonnet</option>
+                                    <option value="openrouter/anthropic/claude-3-7-sonnet-20250219">Claude 3.7 Sonnet</option>
+                                </optgroup>
+                                <optgroup label="🦙 Meta Llama">
+                                    <option value="openrouter/meta-llama/llama-3.3-70b-instruct" selected>Llama 3.3 70B (Fast)</option>
+                                    <option value="openrouter/meta-llama/llama-3.1-8b-instruct">Llama 3.1 8B (Lightweight)</option>
+                                </optgroup>
+                                <optgroup label="🔵 Google Gemini">
+                                    <option value="openrouter/google/gemini-2.5-flash-preview:thinking">Gemini 2.5 Flash (Thinking)</option>
+                                    <option value="openrouter/google/gemini-2.0-flash-001">Gemini 2.0 Flash</option>
+                                </optgroup>
+                                <optgroup label="🟩 Other">
+                                    <option value="openrouter/qwen/qwen3-32b">Qwen 3 32B</option>
+                                    <option value="openrouter/deepseek/deepseek-r1">DeepSeek R1 (Reasoning)</option>
+                                </optgroup>
                             </select>
                         </div>
                     </div>
